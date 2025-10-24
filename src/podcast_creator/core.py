@@ -1,3 +1,4 @@
+import os
 import re
 import uuid
 from pathlib import Path
@@ -5,7 +6,9 @@ from typing import Any, Dict, List, Literal, Tuple, Union
 
 from langchain_core.output_parsers.pydantic import PydanticOutputParser
 from loguru import logger
-from moviepy import AudioFileClip, concatenate_audioclips
+from moviepy import AudioFileClip, CompositeAudioClip
+from moviepy.audio.fx.AudioFadeIn import AudioFadeIn
+from moviepy.audio.fx.AudioFadeOut import AudioFadeOut
 from pydantic import BaseModel, Field, field_validator
 
 # Compile regex pattern once for better performance
@@ -192,9 +195,16 @@ async def combine_audio_files(
     audio_dir: Union[Path, str], final_filename: str, final_output_dir: Union[Path, str]
 ):
     """
-    Combines multiple audio files into a single MP3 file using moviepy.
-    Expects 'audio_segments_data' in inputs: a list of strings, where each string is a path to an audio file.
-    Also expects 'final_filename' in inputs: a string for the desired output filename (e.g., "podcast_episode.mp3").
+    Combines multiple audio files into a single MP3 file using moviepy with timeline placement.
+    
+    Uses CompositeAudioClip to place each clip at explicit start times with configurable padding
+    and fade effects to prevent audio truncation at clip boundaries.
+    
+    Configuration (via environment variables):
+    - PODCAST_CREATOR_CLIP_PAD_SEC: Padding between clips in seconds (default: 0.2)
+    - PODCAST_CREATOR_FADE_MS: Fade in/out duration in milliseconds (default: 10)
+    - PODCAST_CREATOR_AUDIO_FPS: Target sample rate/fps (default: 44100)
+    
     Example input: {
         "audio_segments_data": ["path/to/audio1.mp3", "path/to/audio2.mp3"],
         "final_filename": "my_podcast.mp3"
@@ -202,6 +212,16 @@ async def combine_audio_files(
     Output: {"combined_audio_path": "output/audio/my_podcast.mp3"}
     """
     logger.info("[Core Function] combine_audio_files called.")
+    
+    # Read configuration from environment variables with defaults
+    pad_sec = float(os.getenv("PODCAST_CREATOR_CLIP_PAD_SEC", "0.2"))
+    fade_ms = float(os.getenv("PODCAST_CREATOR_FADE_MS", "10"))
+    target_fps = int(os.getenv("PODCAST_CREATOR_AUDIO_FPS", "44100"))
+    
+    fade_sec = fade_ms / 1000.0  # Convert milliseconds to seconds
+    
+    logger.debug(f"Audio combination settings: pad={pad_sec}s, fade={fade_sec}s, fps={target_fps}")
+    
     if isinstance(audio_dir, str):
         audio_dir = Path(audio_dir)
     if isinstance(final_output_dir, str):
@@ -226,7 +246,9 @@ async def combine_audio_files(
         }
 
     clips = []
-    valid_clips = []
+    timeline = []
+    t = 0.0
+    
     for i, file_path in enumerate(list_of_audio_paths):
         if not isinstance(file_path, Path):
             logger.warning(
@@ -236,8 +258,25 @@ async def combine_audio_files(
 
         try:
             if file_path.exists() and file_path.is_file():
-                clips.append(AudioFileClip(str(file_path)))
-                valid_clips.append(clips[-1])  # Keep track of valid clips for later
+                # Load clip and set fps
+                clip = AudioFileClip(str(file_path))
+                clip = clip.with_fps(target_fps)
+                
+                # Apply fade effects
+                clip = clip.with_effects([
+                    AudioFadeIn(fade_sec),
+                    AudioFadeOut(fade_sec)
+                ])
+                
+                # Add to timeline at current position
+                clip = clip.with_start(t)
+                timeline.append(clip)
+                clips.append(clip)
+                
+                # Advance timeline position
+                t += clip.duration + pad_sec
+                
+                logger.debug(f"Added clip {i} at position {clip.start}s, duration {clip.duration}s")
             else:
                 logger.error(
                     f"combine_audio_files: File not found or not a file: {file_path}"
@@ -247,22 +286,24 @@ async def combine_audio_files(
                 f"combine_audio_files: Error loading audio clip {file_path}: {e}"
             )
 
-    if not clips:
+    if not timeline:
         logger.error("combine_audio_files: No valid audio clips could be loaded.")
         return {"combined_audio_path": "ERROR: No valid clips"}
 
     try:
-        # Ensure all clips are closed after concatenation, even if it fails during the process.
-        # MoviePy's concatenate_audioclips might not close source clips if it errors out mid-way.
-        final_clip = concatenate_audioclips(clips)
+        # Calculate final duration (subtract the last pad since we don't need it after the last clip)
+        final_duration = max(t - pad_sec, 0)
+        
+        # Create composite clip with timeline
+        final_clip = CompositeAudioClip(timeline).with_duration(final_duration)
     except Exception as e:
-        logger.error(f"Error during concatenate_audioclips: {e}")
+        logger.error(f"Error during CompositeAudioClip creation: {e}")
         for clip_obj in clips:
             try:
                 clip_obj.close()
             except Exception as close_exc:
                 logger.debug(f"Error closing clip during error handling: {close_exc}")
-        return {"combined_audio_path": f"ERROR: Concatenation failed - {e}"}
+        return {"combined_audio_path": f"ERROR: Composition failed - {e}"}
 
     output_dir = final_output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -285,18 +326,18 @@ async def combine_audio_files(
     output_path = output_dir / output_filename
 
     try:
-        final_clip.write_audiofile(str(output_path), codec="mp3")
+        final_clip.write_audiofile(str(output_path), fps=target_fps, codec="libmp3lame")
         logger.info(f"Successfully combined audio to: {output_path.resolve()}")
         return {
             "combined_audio_path": str(output_path.resolve()),
-            "original_segments_count": len(valid_clips),
+            "original_segments_count": len(clips),
             "total_duration_seconds": final_clip.duration,
         }
     except Exception as e:
         logger.error(f"Error writing final audio file {output_path}: {e}")
         return {"combined_audio_path": f"ERROR: Failed to write output audio - {e}"}
     finally:
-        final_clip.close()  # Close the final concatenated clip
+        final_clip.close()  # Close the final composite clip
         for clip_obj in clips:  # Ensure all source clips are closed
             try:
                 clip_obj.close()
