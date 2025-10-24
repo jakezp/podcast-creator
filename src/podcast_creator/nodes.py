@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from pathlib import Path
 from typing import Dict
@@ -50,6 +51,21 @@ async def generate_outline_node(state: PodcastState, config: RunnableConfig) -> 
     outline_preview = await outline_model.ainvoke(outline_prompt_text)
     outline_preview.content = clean_thinking_content(outline_preview.content)
     outline_content = extract_json_text(outline_preview.content)
+
+    # Normalize outline JSON: support bare arrays or nulls
+    try:
+        outline_obj = json.loads(outline_content)
+        if outline_obj is None:
+            logger.warning("Outline model returned null; substituting empty segments list")
+            outline_obj = {"segments": []}
+        elif isinstance(outline_obj, list):
+            # Heuristic: if items look like segments, wrap under segments
+            outline_obj = {"segments": outline_obj}
+        outline_content = json.dumps(outline_obj)
+    except Exception:
+        # Leave as-is; parser will raise with a clear message
+        pass
+
     outline_result = outline_parser.invoke(outline_content)
 
     logger.info(f"Generated outline with {len(outline_result.segments)} segments")
@@ -110,6 +126,20 @@ async def generate_transcript_node(state: PodcastState, config: RunnableConfig) 
         transcript_preview = await transcript_model.ainvoke(transcript_prompt_rendered)
         transcript_preview.content = clean_thinking_content(transcript_preview.content)
         transcript_content = extract_json_text(transcript_preview.content)
+
+        # Normalize transcript JSON: support bare arrays or nulls
+        try:
+            t_obj = json.loads(transcript_content)
+            if t_obj is None:
+                logger.warning("Transcript model returned null; substituting empty transcript list")
+                t_obj = {"transcript": []}
+            elif isinstance(t_obj, list):
+                t_obj = {"transcript": t_obj}
+            transcript_content = json.dumps(t_obj)
+        except Exception:
+            # Leave as-is; parser will handle/raise
+            pass
+
         result = validated_transcript_parser.invoke(transcript_content)
         transcript.extend(result.transcript)
 
