@@ -574,6 +574,33 @@ This is particularly useful for:
 - **Other TTS providers** with stricter rate limits
 - **Debugging**: Set to 1 for sequential processing
 
+### 🎵 Audio Combination Configuration
+
+The audio combination process uses timeline-based placement with padding and fades to prevent audio truncation at clip boundaries. You can configure these settings via environment variables:
+
+```bash
+# In your .env file
+PODCAST_CREATOR_CLIP_PAD_SEC=0.2   # Padding between clips in seconds (default: 0.2)
+PODCAST_CREATOR_FADE_MS=10         # Fade in/out duration in milliseconds (default: 10)
+PODCAST_CREATOR_AUDIO_FPS=44100    # Target sample rate for output audio (default: 44100)
+```
+
+**What these settings do:**
+- **CLIP_PAD_SEC**: Adds a small gap between audio clips to prevent MP3 encoder truncation issues
+  - Default: 0.2 seconds (200ms)
+  - Increase if you notice syllables being cut off between clips
+  - Set to 0 for back-to-back concatenation (not recommended)
+
+- **FADE_MS**: Applies smooth fade in/out effects to prevent audio pops
+  - Default: 10 milliseconds
+  - Prevents audible clicks at clip boundaries
+  - Longer fades create smoother transitions but may sound unnatural
+
+- **AUDIO_FPS**: Normalizes all clips to a consistent sample rate
+  - Default: 44100 Hz (CD quality)
+  - Ensures proper audio synchronization
+  - Higher values increase quality but also file size
+
 ## 🧪 Development
 
 ### Installing for Development
