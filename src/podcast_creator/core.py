@@ -273,14 +273,25 @@ async def combine_audio_files(
     """
     logger.info("[Core Function] combine_audio_files called.")
     
+    # Load .env if present so users can configure without exporting
+    try:
+        from dotenv import load_dotenv  # type: ignore
+        load_dotenv()
+    except Exception as e:
+        logger.debug(f".env loading skipped or failed: {e}")
+
     # Read configuration from environment variables with defaults
     pad_sec = float(os.getenv("PODCAST_CREATOR_CLIP_PAD_SEC", "0.2"))
+    pad_sec = max(pad_sec, 0.0)
     fade_ms = float(os.getenv("PODCAST_CREATOR_FADE_MS", "10"))
     target_fps = int(os.getenv("PODCAST_CREATOR_AUDIO_FPS", "44100"))
     
-    fade_sec = fade_ms / 1000.0  # Convert milliseconds to seconds
-    
-    logger.debug(f"Audio combination settings: pad={pad_sec}s, fade={fade_sec}s, fps={target_fps}")
+    fade_sec = max(fade_ms, 0.0) / 1000.0  # Convert milliseconds to seconds, clamp >= 0
+
+    # Log at INFO so users can see effective settings without enabling debug
+    logger.info(
+        f"Audio combination settings: pad={pad_sec:.3f}s, fade={fade_sec:.3f}s, fps={target_fps}"
+    )
     
     if isinstance(audio_dir, str):
         audio_dir = Path(audio_dir)
@@ -308,6 +319,8 @@ async def combine_audio_files(
     clips = []
     timeline = []
     t = 0.0
+    last_end = 0.0
+    total_files = len(list_of_audio_paths)
     
     for i, file_path in enumerate(list_of_audio_paths):
         if not isinstance(file_path, Path):
@@ -321,22 +334,39 @@ async def combine_audio_files(
                 # Load clip and set fps
                 clip = AudioFileClip(str(file_path))
                 clip = clip.with_fps(target_fps)
-                
-                # Apply fade effects
-                clip = clip.with_effects([
-                    AudioFadeIn(fade_sec),
-                    AudioFadeOut(fade_sec)
-                ])
-                
-                # Add to timeline at current position
-                clip = clip.with_start(t)
+
+                # Apply boundary fades conservatively to avoid audible cuts
+                # - fade in on non-first clips
+                # - fade out on non-last clips
+                if fade_sec > 0:
+                    effects = []
+                    if i > 0:
+                        effects.append(AudioFadeIn(fade_sec))
+                    if i < total_files - 1:
+                        effects.append(AudioFadeOut(fade_sec))
+                    if effects:
+                        clip = clip.with_effects(effects)
+
+                # Place on timeline at current start time
+                clip_start = t
+                clip = clip.with_start(clip_start)
                 timeline.append(clip)
                 clips.append(clip)
-                
-                # Advance timeline position
-                t += clip.duration + pad_sec
-                
-                logger.debug(f"Added clip {i} at position {clip.start}s, duration {clip.duration}s")
+
+                # Compute end based on actual placed duration
+                clip_end = clip_start + clip.duration
+                last_end = max(last_end, clip_end)
+
+                # Advance timeline position, only add padding if not the last clip
+                if i < total_files - 1:
+                    t = clip_end + pad_sec
+                else:
+                    t = clip_end
+
+                logger.info(
+                    f"Added clip {i+1}/{total_files}: start={clip_start:.3f}s, "
+                    f"dur={clip.duration:.3f}s, end={clip_end:.3f}s"
+                )
             else:
                 logger.error(
                     f"combine_audio_files: File not found or not a file: {file_path}"
@@ -351,11 +381,14 @@ async def combine_audio_files(
         return {"combined_audio_path": "ERROR: No valid clips"}
 
     try:
-        # Calculate final duration (subtract the last pad since we don't need it after the last clip)
-        final_duration = max(t - pad_sec, 0)
-        
+        # Use the computed end of the last placed clip for precise duration
+        final_duration = max(last_end, 0)
+
         # Create composite clip with timeline
         final_clip = CompositeAudioClip(timeline).with_duration(final_duration)
+        logger.info(
+            f"Final composition duration: {final_duration:.3f}s from {len(timeline)} clip(s)"
+        )
     except Exception as e:
         logger.error(f"Error during CompositeAudioClip creation: {e}")
         for clip_obj in clips:
