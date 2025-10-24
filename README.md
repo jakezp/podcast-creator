@@ -601,6 +601,31 @@ PODCAST_CREATOR_AUDIO_FPS=44100    # Target sample rate for output audio (defaul
   - Ensures proper audio synchronization
   - Higher values increase quality but also file size
 
+### 🛡️ Input Normalization (Optional but recommended)
+
+Some MP3 streams lack accurate VBR/Xing frame metadata. In those cases, the container duration may be underestimated, and timeline-based composition can drop audible content beyond the estimated length. This has been observed with certain TTS outputs (YMMV).
+
+Enable input normalization to safeguard against bad duration headers:
+
+```bash
+# In your .env file
+PODCAST_CREATOR_NORMALIZE_INPUT=1   # default: 1 (enabled)
+```
+
+What it does when enabled:
+
+- Detects compressed inputs (mp3/m4a/aac/ogg)
+- Decodes each clip to a temporary WAV (using a bundled ffmpeg via imageio-ffmpeg)
+- Places those WAVs on the timeline so durations are exact
+- Writes the final output (MP3 by default)
+- Cleans up temporary WAVs automatically
+
+Notes:
+
+- Logs at INFO level will show whether normalization is enabled, which ffmpeg path is used, and which clips were normalized.
+- Set `PODCAST_CREATOR_NORMALIZE_INPUT=0` to disable and use compressed inputs as-is (risking truncated durations if headers are wrong).
+- If your TTS can emit WAV directly, you may prefer generating WAV → combine → single final MP3 encode for maximum consistency and minimal re-encoding.
+
 ## 🧪 Development
 
 ### Installing for Development

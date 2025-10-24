@@ -2,6 +2,9 @@ import os
 import re
 import uuid
 from pathlib import Path
+import tempfile
+import subprocess
+import shutil
 from typing import Any, Dict, List, Literal, Tuple, Union
 
 from langchain_core.output_parsers.pydantic import PydanticOutputParser
@@ -321,6 +324,34 @@ async def combine_audio_files(
     t = 0.0
     last_end = 0.0
     total_files = len(list_of_audio_paths)
+
+    # Normalize problematic compressed inputs (e.g., MP3 with bad VBR headers)
+    # to WAV via ffmpeg to avoid truncated durations during composition.
+    # Prefer the bundled ffmpeg from imageio-ffmpeg (no system install required),
+    # falling back to a system ffmpeg if available.
+    normalize_inputs = os.getenv("PODCAST_CREATOR_NORMALIZE_INPUT", "1") not in ("0", "false", "False")
+    ffmpeg_path = None
+    if normalize_inputs:
+        try:
+            import imageio_ffmpeg  # type: ignore
+            ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            ffmpeg_path = shutil.which("ffmpeg")
+
+    tmpdir_ctx = tempfile.TemporaryDirectory() if normalize_inputs and ffmpeg_path else None
+    tmpdir = Path(tmpdir_ctx.name) if tmpdir_ctx else None
+
+    # Log normalization configuration
+    logger.info(
+        f"Normalization: {'enabled' if normalize_inputs else 'disabled'}"
+    )
+    if normalize_inputs:
+        if ffmpeg_path:
+            logger.info(f"Normalization ffmpeg: {ffmpeg_path}")
+        else:
+            logger.warning(
+                "Normalization requested but no ffmpeg executable found. Proceeding without normalization."
+            )
     
     for i, file_path in enumerate(list_of_audio_paths):
         if not isinstance(file_path, Path):
@@ -331,8 +362,37 @@ async def combine_audio_files(
 
         try:
             if file_path.exists() and file_path.is_file():
+                # Optional: pre-normalize to WAV for reliable duration
+                src_path = file_path
+                ext = file_path.suffix.lower()
+                if normalize_inputs and ffmpeg_path and ext in {".mp3", ".m4a", ".aac", ".ogg"}:
+                    try:
+                        norm_path = (tmpdir / f"{file_path.stem}_{i:02d}.wav") if tmpdir else None
+                        if norm_path:
+                            cmd = [
+                                ffmpeg_path,
+                                "-y",
+                                "-i",
+                                str(file_path),
+                                "-c:a",
+                                "pcm_s16le",
+                                "-ar",
+                                str(target_fps),
+                                str(norm_path),
+                            ]
+                            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            src_path = norm_path
+                            logger.info(
+                                f"Normalized clip {i+1}/{total_files}: {file_path.name} ({ext}) -> {norm_path.name}"
+                            )
+                    except Exception as norm_exc:
+                        logger.warning(f"Normalization to WAV failed for {file_path}: {norm_exc}. Using original file.")
+                else:
+                    if normalize_inputs and ext not in {".mp3", ".m4a", ".aac", ".ogg"}:
+                        logger.debug(f"Skipping normalization for {file_path.name} (ext {ext})")
+
                 # Load clip and set fps
-                clip = AudioFileClip(str(file_path))
+                clip = AudioFileClip(str(src_path))
                 clip = clip.with_fps(target_fps)
 
                 # Apply boundary fades conservatively to avoid audible cuts
@@ -436,3 +496,8 @@ async def combine_audio_files(
                 clip_obj.close()
             except Exception as close_exc:
                 logger.debug(f"Error closing source clip: {close_exc}")
+        if tmpdir_ctx:
+            try:
+                tmpdir_ctx.cleanup()
+            except Exception:
+                pass
