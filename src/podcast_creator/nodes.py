@@ -16,6 +16,8 @@ from .core import (
     get_outline_prompter,
     get_transcript_prompter,
     outline_parser,
+    normalize_tts_text,
+    sanitize_jsonish_backslashes,
 )
 from .state import PodcastState
 
@@ -51,6 +53,10 @@ async def generate_outline_node(state: PodcastState, config: RunnableConfig) -> 
     outline_preview = await outline_model.ainvoke(outline_prompt_text)
     outline_preview.content = clean_thinking_content(outline_preview.content)
     outline_content = extract_json_text(outline_preview.content)
+    # Sanitize invalid single backslashes in JSON-like strings
+    sanitized_outline = sanitize_jsonish_backslashes(outline_content)
+    if sanitized_outline != outline_content:
+        outline_content = sanitized_outline
 
     # Normalize outline JSON: support bare arrays or nulls
     try:
@@ -126,6 +132,10 @@ async def generate_transcript_node(state: PodcastState, config: RunnableConfig) 
         transcript_preview = await transcript_model.ainvoke(transcript_prompt_rendered)
         transcript_preview.content = clean_thinking_content(transcript_preview.content)
         transcript_content = extract_json_text(transcript_preview.content)
+        # Sanitize invalid single backslashes in JSON-like strings
+        sanitized_transcript = sanitize_jsonish_backslashes(transcript_content)
+        if sanitized_transcript != transcript_content:
+            transcript_content = sanitized_transcript
 
         # Normalize transcript JSON: support bare arrays or nulls
         try:
@@ -248,8 +258,16 @@ async def generate_single_audio_clip(dialogue_info: Dict) -> Path:
     tts_model = AIFactory.create_text_to_speech(tts_provider, tts_model_name)
 
     # Generate audio
+    # Normalize text for TTS to improve timing and pronunciation
+    original_text = dialogue.dialogue
+    norm_text = normalize_tts_text(original_text)
+    if norm_text != original_text:
+        logger.debug(
+            f"Normalized TTS text for clip {index:04d}: {len(original_text)} -> {len(norm_text)} chars"
+        )
+
     await tts_model.agenerate_speech(
-        text=dialogue.dialogue, voice=voices[dialogue.speaker], output_file=clip_path
+        text=norm_text, voice=voices[dialogue.speaker], output_file=clip_path
     )
 
     logger.info(f"Generated audio clip: {clip_path}")

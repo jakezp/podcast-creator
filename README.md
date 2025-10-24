@@ -626,6 +626,36 @@ Notes:
 - Set `PODCAST_CREATOR_NORMALIZE_INPUT=0` to disable and use compressed inputs as-is (risking truncated durations if headers are wrong).
 - If your TTS can emit WAV directly, you may prefer generating WAV → combine → single final MP3 encode for maximum consistency and minimal re-encoding.
 
+### ✍️ TTS Text Normalization (Recommended)
+
+Normalize transcript text before synthesis to improve pacing and pronunciation. Controlled via environment variables:
+
+```bash
+# In your .env file
+PODCAST_CREATOR_TTS_NORMALIZE=1        # default: 1 (enabled)
+PODCAST_CREATOR_TTS_ENSURE_PUNCT=1     # default: 1 (enabled)
+# Optional fine-tuning
+PODCAST_CREATOR_TTS_LONGER_COMMA_PAUSE=1  # default: 1 (use semicolons for slightly longer comma pauses)
+PODCAST_CREATOR_TTS_EMPHASIS=1            # default: 1 (double ! and ? for a touch more emphasis)
+```
+
+What it does when enabled:
+
+- Replace em/en dashes and spaced hyphens with commas to avoid odd timing
+- Convert smart punctuation to ASCII (quotes, ellipsis)
+- Remove stray control characters and collapse whitespace
+- Ensure a closing punctuation mark (., !, ?) at the end
+- Season/Episode numbers lose leading zeros (e.g., “Season 02, Episode 05” → “Season 2, Episode 5”)
+- Patterns like S02E05 expand to “S-0-2-E-0-5” to prevent “sexex” pronunciations
+- Commas become semicolons for a slightly longer pause (not between digits like 1,000)
+- “!” and “?” gain a little emphasis by doubling (configurable)
+
+Notes:
+
+- These changes affect only the text sent to TTS (not your stored transcript)
+- You can toggle specific behaviors with the env vars above
+- If your TTS supports SSML, you may prefer SSML-based pauses/emphasis; this normalization is provider-agnostic
+
 ## 🧪 Development
 
 ### Installing for Development

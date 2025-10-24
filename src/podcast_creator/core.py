@@ -230,6 +230,142 @@ def create_validated_transcript_parser(valid_speaker_names: List[str]):
 outline_parser = PydanticOutputParser(pydantic_object=Outline)
 transcript_parser = PydanticOutputParser(pydantic_object=Transcript)
 
+def sanitize_jsonish_backslashes(text: str) -> str:
+    r"""
+    Make loosely JSON-like strings parseable by doubling any single backslashes
+    that are not starting a valid JSON escape sequence.
+
+    Example: "Plex\ Media\ Server" (invalid JSON escapes) becomes
+    "Plex\\ Media\\ Server" which is valid JSON and preserves the intended
+    backslash characters.
+
+    Valid JSON escape starters are: \" \/ \\ \b \f \n \r \t \u
+    We only rewrite backslashes not followed by one of these letters/symbols.
+    """
+    if not isinstance(text, str):
+        return text
+    return re.sub(r"\\(?![\"\\/bfnrtu])", r"\\\\", text)
+
+def _int_or_zero(s: str) -> int:
+    try:
+        return int(s)
+    except Exception:
+        return 0
+
+def _hyphenate_digits(d: str, placeholder: str) -> str:
+    return placeholder.join(list(d)) if d else ""
+
+def normalize_tts_text(text: str) -> str:
+    """
+    Normalize transcript text before sending to TTS engines.
+
+    Behavior is gated by environment variables (all enabled by default):
+    - PODCAST_CREATOR_TTS_NORMALIZE: main normalization pass (default 1)
+    - PODCAST_CREATOR_TTS_ENSURE_PUNCT: ensure closing punctuation (default 1)
+    - PODCAST_CREATOR_TTS_LONGER_COMMA_PAUSE: lengthen comma pause by using semicolons (default 1)
+    - PODCAST_CREATOR_TTS_EMPHASIS: increase emphasis for ! and ? by doubling them (default 1)
+
+    Transformations (when enabled):
+    - Replace em/en dashes and spaced hyphens with commas
+    - Convert smart quotes and ellipsis to ASCII
+    - Remove stray control characters and zero-width spaces
+    - Collapse whitespace to single spaces
+    - Season/Episode: remove leading zeros (e.g., "Season 02, Episode 05" -> "Season 2, Episode 5")
+    - SxxExx patterns (e.g., S02E05) expanded to S-0-2-E-0-5 to avoid "sexex" pronunciations
+    - Make comma pauses slightly longer (comma -> semicolon) where safe (not between digits)
+    - Add a terminal punctuation mark (., !, ?) if missing
+    - Add slight emphasis for ! and ? by doubling them ("!" -> "!!", "?" -> "??")
+    """
+    if not isinstance(text, str):
+        text = str(text) if text is not None else ""
+
+    ensure_punct = os.getenv("PODCAST_CREATOR_TTS_ENSURE_PUNCT", "1").lower() not in ("0", "false")
+    do_norm = os.getenv("PODCAST_CREATOR_TTS_NORMALIZE", "1").lower() not in ("0", "false")
+    longer_comma = os.getenv("PODCAST_CREATOR_TTS_LONGER_COMMA_PAUSE", "1").lower() not in ("0", "false")
+    emphasis = os.getenv("PODCAST_CREATOR_TTS_EMPHASIS", "1").lower() not in ("0", "false")
+
+    s = text
+
+    # Protect SxxExx expansions so subsequent dash cleanup doesn't remove the helpful hyphens
+    H = "\uFFF0"  # placeholder unlikely to appear in user text
+
+    def expand_sxxexx(match: re.Match) -> str:
+        s_num = match.group(1)
+        e_num = match.group(2)
+        s_digits = _hyphenate_digits(s_num, H)
+        e_digits = _hyphenate_digits(e_num, H)
+        return f"S{H}{s_digits}{H}E{H}{e_digits}"
+
+    if do_norm:
+        # Season 02, Episode 05 -> Season 2, Episode 5
+        def season_ep_repl(m: re.Match) -> str:
+            s_no = _int_or_zero(m.group(1))
+            e_no = _int_or_zero(m.group(2))
+            return f"Season {s_no}, Episode {e_no}"
+
+        s = re.sub(r"\bSeason\s+0*(\d+)\s*,\s*Episode\s+0*(\d+)\b", season_ep_repl, s, flags=re.IGNORECASE)
+
+        # Expand SxxExx (e.g., S02E05, S2E5, S 02 E 05)
+        s = re.sub(r"\bS\s*0*(\d{1,3})\s*E\s*0*(\d{1,3})\b", expand_sxxexx, s, flags=re.IGNORECASE)
+        s = re.sub(r"\bS\s*0*(\d{1,3})\s*[xX]\s*0*(\d{1,3})\b", expand_sxxexx, s)
+        s = re.sub(r"\bS0*(\d{1,3})E0*(\d{1,3})\b", expand_sxxexx, s)
+
+        # Normalize smart punctuation -> ASCII
+        replacements = {
+            "\u201C": '"',  # left double quote
+            "\u201D": '"',  # right double quote
+            "\u2018": "'",  # left single quote
+            "\u2019": "'",  # right single quote
+            "\u2026": "...",  # ellipsis
+            "\u00A0": " ",  # non-breaking space
+            "\u2009": " ",  # thin space
+            "\u200A": " ",  # hair space
+            "\u200B": "",    # zero-width space
+            "\u200C": "",
+            "\u200D": "",
+            "\u2060": "",
+            "\uFEFF": "",
+        }
+        for k, v in replacements.items():
+            s = s.replace(k, v)
+
+        # Replace em/en/figure dashes or spaced hyphens with comma + space
+        s = re.sub(r"\s*[\u2014\u2013\u2012]+\s*", ", ", s)  # em/en/figure dash
+        s = re.sub(r"\s+-\s+", ", ", s)  # spaced ASCII hyphen
+        s = re.sub(r"--+", ", ", s)  # double hyphens
+
+        # For intra-word hyphens, prefer a soft separation (space) instead of comma
+        s = re.sub(r"(?<=\w)-(?!\s|$)(?=\w)", " ", s)
+
+        # Remove stray C0/C1 control chars except tab/newline (we collapse later anyway)
+        s = re.sub(r"[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]", "", s)
+
+        # Collapse repeated commas/spaces to a single ", "
+        s = re.sub(r"\s*,\s*", ", ", s)
+        s = re.sub(r",\s*,+", ", ", s)
+
+    # Lengthen comma pause (not between digits like 1,000)
+    if do_norm and longer_comma:
+        s = re.sub(r"(?<!\d),(?!\d)", ";", s)
+
+    # Emphasis on ! and ? by doubling single occurrences
+    if do_norm and emphasis:
+        s = re.sub(r"!+", lambda m: "!!" if len(m.group(0)) == 1 else m.group(0), s)
+        s = re.sub(r"\?+", lambda m: "??" if len(m.group(0)) == 1 else m.group(0), s)
+
+    # Collapse all whitespace to single spaces
+    if do_norm:
+        s = re.sub(r"\s+", " ", s).strip()
+
+    # Ensure terminal punctuation
+    if ensure_punct and s and s[-1] not in ".!?":
+        s = s + "."
+
+    # Restore protected hyphens in S-*-E-* expansions
+    s = s.replace(H, "-")
+
+    return s
+
 
 def get_outline_prompter():
     """Get outline prompter with configuration support."""
