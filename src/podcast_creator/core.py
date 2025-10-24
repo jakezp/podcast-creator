@@ -11,8 +11,10 @@ from moviepy.audio.fx.AudioFadeIn import AudioFadeIn
 from moviepy.audio.fx.AudioFadeOut import AudioFadeOut
 from pydantic import BaseModel, Field, field_validator
 
-# Compile regex pattern once for better performance
-THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
+# Compile regex patterns once for better performance
+THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
+JSON_FENCE_PATTERN = re.compile(r"```json\s*([\s\S]*?)```", re.IGNORECASE)
+ANY_FENCE_PATTERN = re.compile(r"```\s*([\s\S]*?)```")
 
 
 def parse_thinking_content(content: str) -> Tuple[str, str]:
@@ -81,6 +83,64 @@ def clean_thinking_content(content: str) -> str:
     """
     _, cleaned_content = parse_thinking_content(content)
     return cleaned_content
+
+
+def extract_json_text(content: str) -> str:
+    """
+    Extract the most likely JSON payload from an LLM response.
+
+    Handles cases where providers prepend reasoning traces like <think>...</think>,
+    or wrap JSON in code fences. Falls back to slicing from the first JSON delimiter
+    to the last closing bracket if necessary.
+
+    Args:
+        content: Raw model output (potentially with reasoning or markdown)
+
+    Returns:
+        A string that should contain only JSON (object or array) content.
+    """
+    if not isinstance(content, str):
+        return str(content) if content is not None else ""
+
+    text = content
+
+    # 1) Remove any complete <think>...</think> blocks (case-insensitive)
+    text = THINK_PATTERN.sub("", text)
+
+    # 2) Prefer JSON fenced blocks if present (use the last one if multiple)
+    fence_matches = list(JSON_FENCE_PATTERN.finditer(text))
+    if fence_matches:
+        return fence_matches[-1].group(1).strip()
+
+    # 3) Fall back to any code fence content (often JSON without explicit language)
+    any_fence_matches = list(ANY_FENCE_PATTERN.finditer(text))
+    if any_fence_matches:
+        candidate = any_fence_matches[-1].group(1).strip()
+        if candidate:
+            return candidate
+
+    # 4) If residual standalone <think> tag exists (unclosed), trim everything before
+    # the first likely JSON start delimiter
+    # Also robust against leading commentary before JSON
+    first_obj = text.find("{")
+    first_arr = text.find("[")
+
+    # Choose earliest positive index among object/array starts
+    starts = [i for i in [first_obj, first_arr] if i >= 0]
+    if starts:
+        start = min(starts)
+        trimmed = text[start:]
+        # 5) Trim trailing noise after the last plausible JSON closer
+        last_obj = trimmed.rfind("}")
+        last_arr = trimmed.rfind("]")
+        end_candidates = [i for i in [last_obj, last_arr] if i >= 0]
+        if end_candidates:
+            end = max(end_candidates) + 1
+            return trimmed[:end].strip()
+        return trimmed.strip()
+
+    # Nothing better found; return original (parser may still handle markdown JSON)
+    return text.strip()
 
 
 class Segment(BaseModel):

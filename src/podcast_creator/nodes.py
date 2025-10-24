@@ -10,6 +10,7 @@ from loguru import logger
 from .core import (
     clean_thinking_content,
     combine_audio_files,
+    extract_json_text,
     create_validated_transcript_parser,
     get_outline_prompter,
     get_transcript_prompter,
@@ -48,7 +49,8 @@ async def generate_outline_node(state: PodcastState, config: RunnableConfig) -> 
 
     outline_preview = await outline_model.ainvoke(outline_prompt_text)
     outline_preview.content = clean_thinking_content(outline_preview.content)
-    outline_result = outline_parser.invoke(outline_preview.content)
+    outline_content = extract_json_text(outline_preview.content)
+    outline_result = outline_parser.invoke(outline_content)
 
     logger.info(f"Generated outline with {len(outline_result.segments)} segments")
 
@@ -107,7 +109,8 @@ async def generate_transcript_node(state: PodcastState, config: RunnableConfig) 
         transcript_prompt_rendered = transcript_prompt.render(data)
         transcript_preview = await transcript_model.ainvoke(transcript_prompt_rendered)
         transcript_preview.content = clean_thinking_content(transcript_preview.content)
-        result = validated_transcript_parser.invoke(transcript_preview.content)
+        transcript_content = extract_json_text(transcript_preview.content)
+        result = validated_transcript_parser.invoke(transcript_content)
         transcript.extend(result.transcript)
 
     logger.info(f"Generated transcript with {len(transcript)} dialogue segments")
